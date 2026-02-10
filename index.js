@@ -1,5 +1,8 @@
 require('dotenv').config();
 
+console.log('🔑 JWT_SECRET loaded:', process.env.JWT_SECRET ? 'Present' : 'Missing');
+console.log('🔑 JWT_SECRET value:', process.env.JWT_SECRET);
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -15,12 +18,43 @@ const multer = require('multer');
 // Import auth components
 require('./config/passport');
 const authRoutes = require('./routes/authRoutes');
+const volunteerRoutes = require('./routes/volunteerRoutes');
+const evidenceRoutes = require('./routes/evidenceRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+// Allow local dev frontend and production frontend (set FRONTEND_URL in Render env)
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+// Set ALLOW_ALL_ORIGINS=true in env to allow all origins (useful for quick testing).
+const ALLOW_ALL_ORIGINS = process.env.ALLOW_ALL_ORIGINS === 'true';
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow non-browser/native requests (no origin) and when ALLOW_ALL_ORIGINS is true
+    if (!origin || ALLOW_ALL_ORIGINS) return callback(null, true);
+
+    const allowed = [
+      'http://localhost:3000',
+      FRONTEND_URL,
+      // Allow React Native development connections (any port)
+      /^http:\/\/192\.168\.\d+\.\d+(?::\d+)?$/,
+      /^http:\/\/10\.0\.\d+\.\d+(?::\d+)?$/,
+      /^http:\/\/172\.\d+\.\d+\.\d+(?::\d+)?$/,
+    ];
+
+    for (const a of allowed) {
+      if (typeof a === 'string' && a === origin) return callback(null, true);
+      if (a instanceof RegExp && a.test(origin)) return callback(null, true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Ensure uploads directory exists
@@ -69,20 +103,17 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/smartsens
 
 // Import User model
 const User = require('./models/User');
-
-// Contact Schema
-const contactSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
-  phone: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-});
-
-const Contact = mongoose.model('Contact', contactSchema);
+// Import Contact model
+const Contact = require('./models/Contact');
 
 // ✅ PASSPORT GOOGLE OAUTH ROUTES
 app.use('/auth', authRoutes);
+
+// ✅ VOLUNTEER NETWORK ROUTES
+app.use('/api/volunteers', volunteerRoutes);
+
+// ✅ EVIDENCE MANAGEMENT ROUTES
+app.use('/api/evidence', evidenceRoutes);
 
 // ✅ LEGACY GOOGLE OAUTH TOKEN VERIFICATION (SECURITY CRITICAL)
 // Verify Google ID token and create/update user
@@ -245,17 +276,56 @@ app.post('/api/auth/login', async (req, res) => {
 
 // Middleware to verify JWT
 const auth = (req, res, next) => {
-  const token = req.header('Authorization');
-  if (!token) {
-    return res.status(401).json({ message: 'No token, authorization denied' });
-  }
-
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const authHeader = req.header('Authorization');
+
+    if (!authHeader) {
+      console.log('❌ No Authorization header provided');
+      return res.status(401).json({ message: 'No token, authorization denied' });
+    }
+
+    if (!authHeader.startsWith('Bearer ')) {
+      console.log('❌ Authorization header does not start with Bearer');
+      return res.status(401).json({ message: 'Invalid token format. Expected: Bearer <token>' });
+    }
+
+    // Extract token from "Bearer <token>" format
+    const token = authHeader.slice(7).trim();
+    console.log('🔍 Extracted token:', token.substring(0, 20) + '...');
+
+    if (!token) {
+      console.log('❌ Empty token after Bearer');
+      return res.status(401).json({ message: 'Empty token provided' });
+    }
+
+    const secret = process.env.JWT_SECRET || 'your-secret-key';
+    console.log('🔑 Using JWT secret:', secret);
+    console.log('🔑 Secret from env:', process.env.JWT_SECRET);
+    console.log('🔑 Using fallback:', !process.env.JWT_SECRET);
+
+    // Verify the token
+    const decoded = jwt.verify(token, secret);
+    console.log('✅ Token decoded successfully:', decoded);
+
+    if (!decoded.userId) {
+      console.log('❌ Token does not contain userId');
+      return res.status(401).json({ message: 'Invalid token structure' });
+    }
+
     req.user = decoded.userId;
+    console.log('✅ Token verified for user:', req.user);
     next();
+
   } catch (error) {
-    res.status(401).json({ message: 'Token is not valid' });
+    console.error('❌ JWT verification error:', error.message);
+
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ message: 'Token has expired' });
+    } else if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ message: 'Invalid token signature' });
+    } else {
+      return res.status(401).json({ message: 'Token verification failed' });
+    }
   }
 };
 
@@ -444,12 +514,40 @@ app.post('/api/chat', auth, async (req, res) => {
   }
 });
 
-app.post('/api/sos/start', auth, (req, res) => {
-  res.json({ message: 'SOS logged' });
+app.post('/api/sos/start', auth, async (req, res) => {
+  try {
+    const { type, location, timestamp, evidence, silent, coordinates } = req.body;
+
+    // Create SOS record
+    const SOS = require('./models/SOS');
+    const sosRecord = new SOS({
+      userId: req.user.userId,
+      type: type || 'manual',
+      location: location || 'Unknown location',
+      timestamp: timestamp ? new Date(timestamp) : new Date(),
+      evidence,
+      silent: silent || false,
+      coordinates,
+      status: 'active'
+    });
+
+    await sosRecord.save();
+
+    console.log(`🚨 SOS logged for user ${req.user.userId}: ${type} at ${location}`);
+
+    res.json({
+      message: 'SOS logged successfully',
+      sosId: sosRecord._id,
+      status: 'active'
+    });
+  } catch (error) {
+    console.error('Error logging SOS:', error);
+    res.status(500).json({ message: 'Failed to log SOS', error: error.message });
+  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Accessible from Android device at: http://192.168.1.7:${PORT}`);
+  console.log(`📱 Accessible from Android device at: http://192.168.1.4:${PORT}`);
   console.log(`💻 Accessible from PC at: http://localhost:${PORT}`);
 });

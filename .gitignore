@@ -1,2 +1,8 @@
+node_modules/
 .env
+uploads/
+npm-debug.log
+dist/
+coverage/
+..env
 node_modules
