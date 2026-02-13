@@ -20,6 +20,7 @@ require('./config/passport');
 const authRoutes = require('./routes/authRoutes');
 const volunteerRoutes = require('./routes/volunteerRoutes');
 const evidenceRoutes = require('./routes/evidenceRoutes');
+const advancedSOSRoutes = require('./routes/advancedSOSRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -114,6 +115,9 @@ app.use('/api/volunteers', volunteerRoutes);
 
 // ✅ EVIDENCE MANAGEMENT ROUTES
 app.use('/api/evidence', evidenceRoutes);
+
+// ✅ ADVANCED SOS ROUTES
+app.use('/api/sos', advancedSOSRoutes);
 
 // ✅ LEGACY GOOGLE OAUTH TOKEN VERIFICATION (SECURITY CRITICAL)
 // Verify Google ID token and create/update user
@@ -543,6 +547,57 @@ app.post('/api/sos/start', auth, async (req, res) => {
   } catch (error) {
     console.error('Error logging SOS:', error);
     res.status(500).json({ message: 'Failed to log SOS', error: error.message });
+  }
+});
+
+// Get SOS history for current user
+app.get('/api/sos/history', auth, async (req, res) => {
+  try {
+    const SOS = require('./models/SOS');
+    const limit = parseInt(req.query.limit) || 50;
+    const page = parseInt(req.query.page) || 1;
+    const skip = (page - 1) * limit;
+
+    // Fetch SOS records for current user, sorted by most recent first
+    const sosRecords = await SOS.find({ userId: req.user.userId })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .skip(skip)
+      .exec();
+
+    // Get total count for pagination
+    const totalCount = await SOS.countDocuments({ userId: req.user.userId });
+
+    // Format response
+    const formattedRecords = sosRecords.map(sos => ({
+      id: sos._id,
+      type: sos.type,
+      location: sos.location,
+      timestamp: sos.timestamp,
+      status: sos.status,
+      coordinates: sos.coordinates,
+      evidence: sos.evidence,
+      silent: sos.silent,
+      createdAt: sos.createdAt
+    }));
+
+    res.json({
+      success: true,
+      data: formattedRecords,
+      pagination: {
+        total: totalCount,
+        page: page,
+        limit: limit,
+        pages: Math.ceil(totalCount / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching SOS history:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to fetch SOS history', 
+      error: error.message 
+    });
   }
 });
 

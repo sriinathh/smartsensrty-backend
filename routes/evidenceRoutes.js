@@ -1,62 +1,405 @@
+/**
+ * SOS Evidence API Routes
+ * Backend endpoints for uploading, storing, and retrieving evidence files
+ * Handles encrypted chunked uploads, metadata, and cloud storage integration
+ */
+
 const express = require('express');
 const router = express.Router();
-const SOSEvidence = require('../models/SOSEvidence');
-const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
+const authenticateToken = require('../middleware/auth');
+const Evidence = require('../models/SOSEvidence');
+const SOSEvent = require('../models/SOS');
+const User = require('../models/User');
 
-// Configure multer for evidence uploads
-const evidenceStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, '../uploads/evidence');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `evidence_${Date.now()}_${crypto.randomBytes(8).toString('hex')}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
-});
-
-const evidenceUpload = multer({
-  storage: evidenceStorage,
+// Multer setup for temporary chunk uploads
+const upload = multer({
+  dest: path.join(__dirname, '../uploads/chunks/'),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB limit
+    fileSize: 100 * 1024 * 1024, // 100MB per chunk
   },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['video/mp4', 'video/avi', 'audio/mpeg', 'audio/wav', 'image/jpeg', 'image/png'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type'), false);
+});
+
+/**
+ * POST /api/sos-evidence/upload-chunk
+ * Upload evidence file chunk (part of larger file)
+ */
+router.post(
+  '/upload-chunk',
+  authenticateToken,
+  upload.single('chunk'),
+  async (req, res) => {
+    try {
+      const { uploadId, recordingId, fileType, chunkIndex, totalChunks } = req.body;
+      const userId = req.user.id;
+
+      if (!uploadId || !recordingId || !fileType || chunkIndex === undefined) {
+        return res.status(400).json({
+          error: 'Missing required fields: uploadId, recordingId, fileType, chunkIndex',
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No chunk file provided' });
+      }
+
+      // Create upload tracking directory
+      const uploadDir = path.join(
+        __dirname,
+        '../uploads/evidence/',
+        uploadId
+      );
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+
+      // Move chunk to upload directory with sequential naming
+      const chunkPath = path.join(uploadDir, `${fileType}_chunk_${chunkIndex}`);
+      fs.renameSync(req.file.path, chunkPath);
+
+      // Track upload progress
+      const progressFile = path.join(uploadDir, 'progress.json');
+      let progress = {};
+      if (fs.existsSync(progressFile)) {
+        progress = JSON.parse(fs.readFileSync(progressFile, 'utf8'));
+      }
+
+      if (!progress[fileType]) {
+        progress[fileType] = {
+          uploadedChunks: 0,
+          totalChunks: parseInt(totalChunks),
+        };
+      }
+
+      progress[fileType].uploadedChunks = parseInt(chunkIndex) + 1;
+      fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
+
+      res.json({
+        success: true,
+        uploadId,
+        recordingId,
+        fileType,
+        chunkIndex: parseInt(chunkIndex),
+        totalChunks: parseInt(totalChunks),
+        progress,
+      });
+    } catch (error) {
+      console.error('❌ Chunk upload failed:', error);
+      res.status(500).json({ error: 'Chunk upload failed', details: error.message });
     }
+  }
+);
+
+/**
+ * POST /api/sos-evidence/finalize-upload
+ * Finalize upload by assembling chunks and storing metadata
+ */
+router.post('/finalize-upload', authenticateToken, async (req, res) => {
+  try {
+    const { uploadId, recordingId, metadata } = req.body;
+    const userId = req.user.id;
+
+    if (!uploadId || !recordingId || !metadata) {
+      return res.status(400).json({
+        error: 'Missing required fields: uploadId, recordingId, metadata',
+      });
+    }
+
+    const uploadDir = path.join(__dirname, '../uploads/evidence/', uploadId);
+
+    if (!fs.existsSync(uploadDir)) {
+      return res.status(404).json({ error: 'Upload session not found' });
+    }
+
+    // Read progress to verify all chunks received
+    const progressFile = path.join(uploadDir, 'progress.json');
+    const progress = JSON.parse(fs.readFileSync(progressFile, 'utf8'));
+
+    // Verify all chunks for all file types
+    for (const [fileType, fileProgress] of Object.entries(progress)) {
+      if (fileProgress.uploadedChunks !== fileProgress.totalChunks) {
+        return res.status(400).json({
+          error: `Incomplete upload for ${fileType}. Received ${fileProgress.uploadedChunks}/${fileProgress.totalChunks} chunks`,
+        });
+      }
+    }
+
+    // Assemble chunks into final files
+    const assembledFiles = {};
+    const fileUrls = {};
+
+    for (const [fileType, fileProgress] of Object.entries(progress)) {
+      try {
+        const finalFilePath = path.join(uploadDir, `${fileType}_final.enc`);
+        const writeStream = fs.createWriteStream(finalFilePath);
+
+        // Assemble chunks in order
+        for (let i = 0; i < fileProgress.totalChunks; i++) {
+          const chunkPath = path.join(uploadDir, `${fileType}_chunk_${i}`);
+          const chunkData = fs.readFileSync(chunkPath);
+          writeStream.write(chunkData);
+          // Delete chunk after writing
+          fs.unlinkSync(chunkPath);
+        }
+
+        writeStream.end();
+
+        assembledFiles[fileType] = finalFilePath;
+
+        // Generate cloud URL (placeholder - implement actual cloud upload)
+        fileUrls[fileType] = `https://smartsensry-backend.herokuapp.com/api/sos-evidence/${recordingId}/${fileType}`;
+      } catch (error) {
+        console.error(`Failed to assemble ${fileType}:`, error);
+      }
+    }
+
+    // Create SOS Evidence record
+    const evidence = new Evidence({
+      recordingId,
+      userId,
+      timestamp: metadata.timestamp,
+      duration: metadata.duration,
+      startTime: metadata.startTime,
+      encryptionIv: metadata.encryptionIv || crypto.randomBytes(16).toString('hex'),
+      fileSizes: metadata.fileSizes,
+      frontVideoUrl: fileUrls.frontVideo,
+      backVideoUrl: fileUrls.backVideo,
+      audioUrl: fileUrls.audioRecording,
+      uploadStatus: 'completed',
+      uploadedAt: new Date(),
+      cloudStorageStatus: 'pending', // Will be updated after cloud upload
+    });
+
+    await evidence.save();
+
+    // Update or create SOS Event
+    const sosEvent = await SOSEvent.findOneAndUpdate(
+      { recordingId },
+      {
+        recordingId,
+        userId,
+        timestamp: metadata.timestamp,
+        status: metadata.status || 'confirmed',
+        location: metadata.location,
+        evidence: evidence._id,
+      },
+      { upsert: true, new: true }
+    );
+
+    // Add evidence to user's SOS history
+    await User.findByIdAndUpdate(userId, {
+      $push: { sosHistory: sosEvent._id },
+    });
+
+    // Clean up upload directory
+    setTimeout(() => {
+      if (fs.existsSync(uploadDir)) {
+        fs.rmSync(uploadDir, { recursive: true });
+      }
+    }, 5000);
+
+    res.json({
+      success: true,
+      message: 'Evidence uploaded successfully',
+      evidenceId: evidence._id,
+      recordingId,
+      urls: fileUrls,
+      uploadId,
+    });
+  } catch (error) {
+    console.error('❌ Finalize upload failed:', error);
+    res.status(500).json({
+      error: 'Failed to finalize upload',
+      details: error.message,
+    });
   }
 });
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+/**
+ * GET /api/sos-evidence/:recordingId
+ * Get evidence metadata and download URLs (with signed URLs for cloud storage)
+ */
+router.get('/:recordingId', authenticateToken, async (req, res) => {
+  try {
+    const { recordingId } = req.params;
+    const userId = req.user.id;
 
-  if (!token) {
-    return res.status(401).json({ message: 'Access token required' });
-  }
+    const evidence = await Evidence.findOne({ recordingId });
 
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ message: 'Invalid token' });
+    if (!evidence) {
+      return res.status(404).json({ error: 'Evidence not found' });
     }
-    req.user = user;
-    next();
+
+    // Verify user owns this evidence
+    if (evidence.userId.toString() !== userId) {
+      return res.status(403).json({
+        error: 'Access denied - not your evidence',
+      });
+    }
+
+    // Generate signed URLs (placeholder implementation)
+    const signedUrls = {
+      frontVideo: evidence.frontVideoUrl
+        ? `${evidence.frontVideoUrl}?token=${_generateSignedToken(recordingId, 'frontVideo', 3600)}`
+        : null,
+      backVideo: evidence.backVideoUrl
+        ? `${evidence.backVideoUrl}?token=${_generateSignedToken(recordingId, 'backVideo', 3600)}`
+        : null,
+      audio: evidence.audioUrl
+        ? `${evidence.audioUrl}?token=${_generateSignedToken(recordingId, 'audio', 3600)}`
+        : null,
+    };
+
+    res.json({
+      success: true,
+      evidence: {
+        recordingId: evidence.recordingId,
+        timestamp: evidence.timestamp,
+        duration: evidence.duration,
+        fileSizes: evidence.fileSizes,
+        urls: signedUrls,
+        uploadStatus: evidence.uploadStatus,
+        uploadedAt: evidence.uploadedAt,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Failed to get evidence:', error);
+    res.status(500).json({
+      error: 'Failed to retrieve evidence',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/sos-events
+ * Get user's SOS event history (secure - user owner only)
+ */
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { limit = 50, skip = 0 } = req.query;
+
+    const events = await SOSEvent.find({ userId })
+      .populate('evidence')
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+
+    const total = await SOSEvent.countDocuments({ userId });
+
+    res.json({
+      success: true,
+      events: events.map((event) => ({
+        id: event._id,
+        recordingId: event.recordingId,
+        timestamp: event.timestamp,
+        status: event.status,
+        location: event.location,
+        evidence: event.evidence
+          ? {
+              recordingId: event.evidence.recordingId,
+              duration: event.evidence.duration,
+              frontVideoUrl: event.evidence.frontVideoUrl,
+              backVideoUrl: event.evidence.backVideoUrl,
+              audioUrl: event.evidence.audioUrl,
+            }
+          : null,
+        notes: event.notes,
+      })),
+      pagination: {
+        total,
+        limit: parseInt(limit),
+        skip: parseInt(skip),
+        hasMore: parseInt(skip) + parseInt(limit) < total,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Failed to get SOS events:', error);
+    res.status(500).json({
+      error: 'Failed to retrieve SOS history',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/sos-events/:eventId
+ * Get single SOS event details (read-only for user)
+ */
+router.get('/events/:eventId', authenticateToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const userId = req.user.id;
+
+    const event = await SOSEvent.findById(eventId).populate('evidence');
+
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    // Verify user owns this event
+    if (event.userId.toString() !== userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      success: true,
+      event: {
+        id: event._id,
+        recordingId: event.recordingId,
+        timestamp: event.timestamp,
+        status: event.status,
+        location: event.location,
+        evidence: event.evidence,
+        notes: event.notes,
+        contacts_notified: event.contacts_notified,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Failed to get SOS event:', error);
+    res.status(500).json({
+      error: 'Failed to retrieve event',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * DELETE /api/sos-events/:eventId
+ * Prevent deletion of SOS events (for legal compliance)
+ */
+router.delete('/events/:eventId', authenticateToken, (req, res) => {
+  res.status(403).json({
+    error: 'Access denied',
+    message: 'SOS events cannot be deleted for legal evidence preservation',
   });
-};
+});
+
+/**
+ * Helper: Generate signed token for file download
+ */
+function _generateSignedToken(recordingId, fileType, expiresIn = 3600) {
+  const payload = {
+    recordingId,
+    fileType,
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + expiresIn * 1000,
+  };
+
+  const signature = crypto
+    .createHmac('sha256', process.env.JWT_SECRET || 'default-secret')
+    .update(JSON.stringify(payload))
+    .digest('hex');
+
+  return Buffer.from(JSON.stringify({ ...payload, signature })).toString('base64');
+}
 
 // Upload evidence files
-router.post('/upload', authenticateToken, evidenceUpload.array('evidence', 10), async (req, res) => {
+router.post('/upload', authenticateToken, upload.array('evidence', 10), async (req, res) => {
   try {
     const { sosId, type, latitude, longitude, placeName } = req.body;
 
@@ -156,6 +499,57 @@ router.post('/upload', authenticateToken, evidenceUpload.array('evidence', 10), 
     }
 
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get all evidence for current user
+router.get('/user/all', authenticateToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const page = parseInt(req.query.page) || 1;
+    const skip = (page - 1) * limit;
+
+    // Fetch evidence for current user
+    const evidence = await SOSEvidence.find({ userId: req.user.id })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .skip(skip)
+      .populate('sosId', 'type location timestamp status')
+      .exec();
+
+    // Get total count
+    const totalCount = await SOSEvidence.countDocuments({ userId: req.user.id });
+
+    // Format response without base64 data (too large)
+    const formattedEvidence = evidence.map(ev => ({
+      id: ev._id,
+      sosId: ev.sosId,
+      type: ev.type,
+      timestamp: ev.timestamp,
+      location: ev.location,
+      files: ev.evidenceFiles.map(f => ({
+        type: f.type,
+        filename: f.filename,
+        mimeType: f.mimeType,
+        size: f.size,
+        secureUrl: f.secureUrl,
+      })),
+      sharedWith: ev.sharedWith,
+    }));
+
+    res.json({
+      success: true,
+      data: formattedEvidence,
+      pagination: {
+        total: totalCount,
+        page: page,
+        limit: limit,
+        pages: Math.ceil(totalCount / limit),
+      },
+    });
+  } catch (error) {
+    console.error('Get user evidence error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
