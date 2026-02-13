@@ -551,58 +551,8 @@ app.post('/api/sos/start', auth, async (req, res) => {
 });
 
 // Get SOS history for current user
-app.get('/api/sos/history', auth, async (req, res) => {
-  try {
-    const SOS = require('./models/SOS');
-    const limit = parseInt(req.query.limit) || 50;
-    const page = parseInt(req.query.page) || 1;
-    const skip = (page - 1) * limit;
-
-    // Fetch SOS records for current user, sorted by most recent first
-    const sosRecords = await SOS.find({ userId: req.user.userId })
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .skip(skip)
-      .exec();
-
-    // Get total count for pagination
-    const totalCount = await SOS.countDocuments({ userId: req.user.userId });
-
-    // Format response
-    const formattedRecords = sosRecords.map(sos => ({
-      id: sos._id,
-      type: sos.type,
-      location: sos.location,
-      timestamp: sos.timestamp,
-      status: sos.status,
-      coordinates: sos.coordinates,
-      evidence: sos.evidence,
-      silent: sos.silent,
-      createdAt: sos.createdAt
-    }));
-
-    res.json({
-      success: true,
-      data: formattedRecords,
-      pagination: {
-        total: totalCount,
-        page: page,
-        limit: limit,
-        pages: Math.ceil(totalCount / limit)
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching SOS history:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Failed to fetch SOS history', 
-      error: error.message 
-    });
-  }
-});
+// NOTE: Route is now defined in advancedSOSRoutes.js and mounted at /api/sos
+// This prevents route conflicts and keeps code organized
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Accessible from Android device at: http://192.168.1.4:${PORT}`);
-  console.log(`💻 Accessible from PC at: http://localhost:${PORT}`);
-});
+  console.log(`🚀 Server running on port ${PORT}`);\n  console.log(`📱 Accessible from Android device at: http://192.168.1.4:${PORT}`);\n  console.log(`💻 Accessible from PC at: http://localhost:${PORT}`);\n  console.log(`🌐 Render URL: https://smartsensrty-backend.onrender.com`);\n  console.log(`📡 API Base: https://smartsensrty-backend.onrender.com/api`);\n});

@@ -17,10 +17,20 @@ const authenticateToken = require('../middleware/auth');
  */
 router.get('/history', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id || req.user._id; // Get userId from authenticated user
+    const userId = req.user.id || req.user.userId || req.user._id;
     const limit = parseInt(req.query.limit) || 50;
     const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
+
+    console.log(`📡 [GET /api/sos/history] userId=${userId}, page=${page}, limit=${limit}`);
+
+    if (!userId) {
+      console.warn('⚠️ [GET /api/sos/history] User ID not found in token');
+      return res.status(400).json({
+        success: false,
+        message: 'User ID not found in authentication token',
+      });
+    }
 
     // Fetch user-specific SOS history
     const sosEvents = await SOS.find({ userId })
@@ -32,6 +42,8 @@ router.get('/history', authenticateToken, async (req, res) => {
     // Get total count for pagination
     const total = await SOS.countDocuments({ userId });
     const pages = Math.ceil(total / limit);
+
+    console.log(`✅ [GET /api/sos/history] Found ${sosEvents.length} records out of ${total} total`);
 
     // Format response
     const formattedData = sosEvents.map(event => ({
