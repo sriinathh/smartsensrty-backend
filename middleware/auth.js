@@ -20,7 +20,7 @@ const authenticateToken = (req, res, next) => {
     }
 
     // Verify token
-    const secret = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+    const secret = process.env.JWT_SECRET || 'your-secret-key';
     jwt.verify(token, secret, (err, user) => {
       if (err) {
         console.error('❌ Token verification failed:', err.message);

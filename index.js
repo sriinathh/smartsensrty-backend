@@ -555,4 +555,9 @@ app.post('/api/sos/start', auth, async (req, res) => {
 // This prevents route conflicts and keeps code organized
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);\n  console.log(`📱 Accessible from Android device at: http://192.168.1.4:${PORT}`);\n  console.log(`💻 Accessible from PC at: http://localhost:${PORT}`);\n  console.log(`🌐 Render URL: https://smartsensrty-backend.onrender.com`);\n  console.log(`📡 API Base: https://smartsensrty-backend.onrender.com/api`);\n});
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📱 Accessible from Android device at: http://192.168.1.4:${PORT}`);
+  console.log(`💻 Accessible from PC at: http://localhost:${PORT}`);
+  console.log(`🌐 Render URL: https://smartsensrty-backend.onrender.com`);
+  console.log(`📡 API Base: https://smartsensrty-backend.onrender.com/api`);
+});
